@@ -15,7 +15,7 @@ MobaXterm and any Linux terminal. Languages: English and Russian.
 
 ## Install (Debian 12/13 or Ubuntu, as root)
 
-    git clone https://github.com/<you>/podkop-sub.git
+    git clone https://github.com/Palkin81/podkop-sub.git
     cd podkop-sub
     sh install.sh            # installs into /opt/podkop-sub, command: podkop-sub
     podkop-sub               # first run opens the setup wizard
