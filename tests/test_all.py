@@ -213,7 +213,8 @@ class CliTests(unittest.TestCase):
         self.srv = http.server.HTTPServer(("127.0.0.1", 0), H)
         threading.Thread(target=self.srv.serve_forever, daemon=True).start()
         cfg = Config(self.tmp / "config.toml")
-        cfg["subscription"]["url"] = f"http://127.0.0.1:{self.srv.server_port}/s/x"
+        cfg.subscriptions.append({"name": "main", "url": f"http://127.0.0.1:{self.srv.server_port}/s/x",
+                                  "enabled": True})
         cfg["router"]["host"] = "fake"
         cfg["filters"]["exclude_countries"] = ["US"]
         cfg["filters"]["prefer_countries"] = ["JP"]

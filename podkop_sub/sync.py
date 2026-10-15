@@ -1,7 +1,8 @@
 """Синхронизация секции podkop с подпиской.
 
 Что считается «неактуальным»:
-  * сервера нет в подписке  -> удаляем (если включено remove_missing);
+  * сервера нет в подписке, из которой он взят, -> удаляем (если включено remove_missing);
+    ссылки без владельца (добавлены вручную) и ссылки подписок, которые не скачались, не трогаем;
   * сервер новый            -> добавляем;
   * ссылка не прошла тест задержки -> заменяем свежей версией из подписки
     (новые sni/sid), не чаще раза в refresh_cooldown_min минут;
@@ -20,7 +21,7 @@ from .links import Link, parse_link, raw_id, same_server
 from .i18n import _
 from .probe import Prober
 from .router import Router, RouterError
-from .subscription import SubscriptionError
+from .sources import Fetched, reconcile_owners
 
 
 # --- защищённый список ----------------------------------------------------
@@ -131,7 +132,12 @@ def format_entry(e: Entry, active_tag: str | None, emoji: bool = True) -> str:
 
 def build_plan(entries: list[Entry], sub_links: list[Link], *, prefer: list[str],
                replaced_at: dict, now: float, cooldown_s: float, remove_missing: bool,
-               active_tag: str | None, alive: Callable[[Link], bool] | None = None) -> Plan:
+               active_tag: str | None, alive: Callable[[Link], bool] | None = None,
+               owners: dict | None = None, ok_sources: set[str] | None = None) -> Plan:
+    """owners: id ссылки -> подписка; ok_sources: подписки, которые скачались в этот запуск.
+    Удаляем только ссылку, чей владелец скачался и больше её не отдаёт."""
+    owners = owners or {}
+    ok_sources = set(ok_sources or ())
     sub_by_key = {l.key: l for l in sub_links}
     cur_keys = {e.link.key for e in entries if e.link}
     plan = Plan(new=[])
@@ -142,7 +148,8 @@ def build_plan(entries: list[Entry], sub_links: list[Link], *, prefer: list[str]
             continue
         fresh = sub_by_key.get(e.link.key) if e.link else None
         if fresh is None:
-            if remove_missing:
+            owner = owners.get(e.link.id) if e.link else None
+            if remove_missing and owner in ok_sources:
                 plan.removed.append(e.raw)
             else:
                 plan.new.append(e.raw)
@@ -281,7 +288,7 @@ def _stamp(msg: str) -> None:
     print(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] {msg}", flush=True)
 
 
-def run_sync(cfg, router: Router, state, notifier, links_fn: Callable[[], list[Link]], *,
+def run_sync(cfg, router: Router, state, notifier, fetch_fn: Callable[[], Fetched], *,
              dry_run: bool = False, sleep: Callable[[float], None] = time.sleep,
              now: float | None = None) -> int:
     """Код возврата: 0 — ок (в том числе «изменений нет»), 1 — ошибка подписки/роутера,
@@ -308,24 +315,29 @@ def run_sync(cfg, router: Router, state, notifier, links_fn: Callable[[], list[L
             "Open podkop-sub → Settings → Protected links and save your choice."))
         return 3
 
-    # 1. подписка
-    links, last_err = None, None
+    # 1. подписки: повторяем только если не скачалась ни одна
+    fetched = Fetched()
     attempts = max(1, int(sync["fetch_attempts"]))
     for attempt in range(1, attempts + 1):
-        try:
-            links = links_fn()
+        fetched = fetch_fn()
+        if fetched.ok:
             break
-        except SubscriptionError as exc:
-            last_err = exc
-            if attempt < attempts:
-                sleep(10)
-    if links is None:
+        if attempt < attempts:
+            sleep(10)
+    if not fetched.ok:
         state["fetch_failures"] = int(state["fetch_failures"]) + 1
         threshold = int(cfg["notify"]["error_threshold"])
+        detail = "; ".join(f"{n}: {e}" for n, e in fetched.errors.items()) or _("no enabled subscriptions")
         return fail(_("subscription unavailable ({e}); consecutive failures: {n}").format(
-            e=last_err, n=state['fetch_failures']),
+            e=detail, n=state['fetch_failures']),
                     notify=state["fetch_failures"] == threshold)
     state["fetch_failures"] = 0
+    for name, err in fetched.errors.items():
+        log(_("Subscription «{name}» unavailable ({e}): its links are left as they are.").format(
+            name=name, e=err))
+    links = fetched.links
+    configured = {s["name"] for s in cfg["subscriptions"]}
+    owners_before = dict(state["owners"])
     if not links:
         return fail(_("no links left after filters, nothing changed"))
     if sync["min_links"] and len(links) < int(sync["min_links"]):
@@ -351,7 +363,7 @@ def run_sync(cfg, router: Router, state, notifier, links_fn: Callable[[], list[L
                       replaced_at=state["replaced_at"], now=ts,
                       cooldown_s=cooldown_s,
                       remove_missing=bool(sync["remove_missing"]), active_tag=active,
-                      alive=prober)
+                      alive=prober, owners=owners_before, ok_sources=set(fetched.ok))
     for raw in plan.rejected:
         log(_("  ✗ {label} — {why}, not added").format(label=label_of(raw, emoji),
                                              why=prober.notes.get(raw, _("failed the check"))))
@@ -367,6 +379,7 @@ def run_sync(cfg, router: Router, state, notifier, links_fn: Callable[[], list[L
         log(_("  · {label} not responding, but replaced recently — waiting").format(label=label_of(raw, emoji)))
 
     if not plan.changed and not plan.switch_to:
+        state["owners"] = reconcile_owners(plan.new, owners_before, fetched.owner_of, configured)
         log(_("No changes."))
         return finish("ok", _("no changes"), 0)
     if dry_run:
@@ -376,6 +389,7 @@ def run_sync(cfg, router: Router, state, notifier, links_fn: Callable[[], list[L
     # 3. переключение активного узла без перезапуска
     switched = ""
     if plan.switch_to and not plan.changed:
+        state["owners"] = reconcile_owners(plan.new, owners_before, fetched.owner_of, configured)
         target = next((e for e in entries if e.tag == plan.switch_to), None)
         name = label_of(target.raw, emoji) if target else plan.switch_to
         if router.switch_active(plan.switch_to):
@@ -395,6 +409,7 @@ def run_sync(cfg, router: Router, state, notifier, links_fn: Callable[[], list[L
             return fail(_("after writing, the list on the router differs from the expected one"), 2)
     except RouterError as exc:
         return fail(_("writing to the router: {e}").format(e=exc))
+    state["owners"] = reconcile_owners(plan.new, owners_before, fetched.owner_of, configured)
     for old, _new in plan.refreshed:
         state["replaced_at"][raw_id(old)] = ts
     keep = {raw_id(r) for r in plan.new}

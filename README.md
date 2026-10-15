@@ -15,7 +15,7 @@ MobaXterm and any Linux terminal. Languages: English and Russian.
 
 ## Install (Debian 12/13 or Ubuntu, as root)
 
-    git clone https://github.com/Palkin81/podkop-sub.git
+    git clone https://github.com/<you>/podkop-sub.git
     cd podkop-sub
     sh install.sh            # installs into /opt/podkop-sub, command: podkop-sub
     podkop-sub               # first run opens the setup wizard
@@ -41,7 +41,7 @@ key with `from="IP-of-this-host"` in `authorized_keys`.
   subscription links without writing, backups and rollback.
 - **Podkop**: status, restart, reload, log.
 - **Schedule**: status, enable or change, disable, run now (dry or full), log.
-- **Settings**: subscription, router, section, link types, excluded and preferred countries,
+- **Settings**: subscriptions, router, section, link types, excluded and preferred countries,
   protected links, sync parameters, Telegram, flag emoji, language, setup wizard.
 - **Help**: keys, sync steps, command-line flags and exit codes.
 
@@ -57,9 +57,25 @@ Keys: ↑↓ and Enter; Space marks items in lists; `a` all, `i` invert; Ctrl+C 
     podkop-sub --update --action merge [--only-preferred] [--restart]
     podkop-sub --rollback
 
+## Several subscriptions
+
+Settings → Subscriptions lists every subscription: add one, rename it, enable or disable it,
+show its links, or delete it. Config (`config.toml`) keeps them as `[[subscriptions]]` blocks.
+
+- All subscriptions are written into the same podkop section.
+- Filters (link types, excluded and preferred countries) are shared by all of them.
+- If one server is in several subscriptions, the first one in the list wins.
+- Each link taken from a subscription remembers its owner (in `state.json`). Links added by
+  hand have no owner: the script never removes them.
+- A subscription that could not be downloaded does not change its own links. Its links stay
+  on the router until it is available again. Retries happen only when none of the
+  subscriptions could be downloaded.
+- Deleting a subscription turns its links into manual ones (the script stops removing them).
+- Old single-subscription configs are converted automatically to one subscription named `main`.
+
 ## Sync in detail
 
-1. Downloads the subscription (3 attempts) and applies the filters.
+1. Downloads all enabled subscriptions (retries only if none of them downloaded) and applies the filters.
 2. Checks each link on the router through `podkop clash_api get_proxy_latency`.
    Running sing-box nodes are matched by host, port and SNI, not by position.
 3. Checks candidates from the subscription before writing them: TCP first, then a full
@@ -67,7 +83,8 @@ Keys: ↑↓ and Enter; Space marks items in lists; `a` all, `i` invert; Ctrl+C 
    `sync.probe_max`.
 4. Plans: adds new links (preferred countries only when preferences are set, the same as the
    manual menu); removes links missing from the subscription (optional); replaces a dead link
-   with a fresh copy that responds. Protected links are never touched.
+   with a fresh copy that responds. Protected links are never touched. Removal applies only to
+   links whose own subscription downloaded successfully and no longer lists them.
 5. Nothing to change: exits. The active node is dead and a live one exists: switches without
    restart.
 6. Otherwise: backup, write, `podkop reload`, verify that sing-box runs exactly the written

@@ -13,8 +13,9 @@ MENU
                                   check new subscription links (no changes).
   Podkop                          status, restart, reload, log.
   Schedule                        automatic runs via /etc/cron.d/podkop-sub.
-  Settings                        subscription, router, filters, protected links,
+  Settings                        subscriptions, router, filters, protected links,
                                   sync parameters, Telegram, language.
+  Settings → Subscriptions        add, rename, enable/disable, delete, show links.
 
 KEYS
   ↑ ↓ Enter   move and choose          Space   mark in lists
@@ -29,9 +30,10 @@ PROTECTED LINKS
   The script never deletes, replaces or updates them, even if they do not respond.
 
 SYNC (what a scheduled run does)
-  1. download subscription  2. check router links and candidates
+  1. download all enabled subscriptions  2. check router links and candidates
   3. add new (preferred countries only, like the manual menu)
-  4. remove links missing from subscription (optional)
+  4. remove links that their own subscription no longer lists (optional);
+     manual links are never removed, links of a subscription that failed are kept
   5. replace dead links with fresh copies that respond
   6. write → reload → verify → restart if needed  7. Telegram report
 
@@ -52,7 +54,7 @@ podkop-sub — импортирует VLESS-ссылки из подписки �
                                 бэкапы, проверка новых ссылок из подписки (без записи).
   Podkop                        статус, перезапуск, reload, лог.
   Расписание                    автозапуск через /etc/cron.d/podkop-sub.
-  Настройки                     подписка, роутер, фильтры, защищённые ссылки,
+  Настройки                     подписки, роутер, фильтры, защищённые ссылки,
                                 параметры синхронизации, Telegram, язык.
 
 КЛАВИШИ
@@ -68,9 +70,10 @@ podkop-sub — импортирует VLESS-ссылки из подписки �
   Скрипт никогда их не удаляет, не заменяет и не обновляет, даже если они не отвечают.
 
 СИНХРОНИЗАЦИЯ (что делает запуск по расписанию)
-  1. скачивает подписку  2. проверяет ссылки роутера и кандидатов
+  1. скачивает все включённые подписки  2. проверяет ссылки роутера и кандидатов
   3. добавляет новые (только страны-предпочтения, как в ручном меню)
-  4. удаляет пропавшие из подписки (можно выключить)
+  4. удаляет ссылки, которых больше нет в их подписке (можно выключить);
+     ручные ссылки не трогает, ссылки недоступной подписки оставляет
   5. заменяет мёртвые ссылки свежими, которые отвечают
   6. запись → reload → проверка → при необходимости restart  7. отчёт в Telegram
 

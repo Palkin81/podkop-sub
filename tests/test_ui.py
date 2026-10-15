@@ -91,6 +91,25 @@ class UiFlowTests(test_all.CliTests):
         cli.flow_delete(self.cfg)
         self.assertEqual([parse_link(r).cc for r in test_all.committed(self.state)], ["FR"])
 
+    def test_subscriptions_add_rename_delete(self):
+        from podkop_sub.state import state_for
+        cfg = Config(self.cfg_path)  # в setUp уже есть подписка «main»
+        state = state_for(cfg)
+        state["owners"] = {"abc": "extra"}
+        state.save()
+        ANSWERS[:] = [
+            pick("add"), "http://b/s", "extra",           # добавить подписку «extra»
+            pick(1),                                      # открыть «extra»
+            pick("name"), "backup",                       # переименовать
+            pick("delete"), True,                         # удалить (подтвердить)
+            pick(ui.BACK),                                # назад из списка подписок
+        ]
+        cli.subscriptions_menu(cfg)
+        self.assertEqual(ANSWERS, [])
+        saved = Config(self.cfg_path)
+        self.assertEqual([x["name"] for x in saved.subscriptions], ["main"])
+        self.assertEqual(state_for(saved)["owners"], {})   # ссылки «backup» стали ручными
+
     def test_wizard_full_and_back(self):
         key = self.tmp / "key"
         key.write_text("x")
@@ -121,7 +140,7 @@ class UiFlowTests(test_all.CliTests):
         self.assertEqual(saved["filters"]["exclude_countries"], ["US"])
         self.assertEqual(saved["filters"]["prefer_countries"], ["JP"])
         self.assertEqual(saved["router"]["section"], "Proxy")
-        self.assertEqual(saved["subscription"]["url"], url)
+        self.assertEqual(saved["subscriptions"][0]["url"], url)
         self.assertTrue(saved.configured)
         self.assertTrue(saved["protect"]["reviewed"])
 

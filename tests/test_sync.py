@@ -17,6 +17,7 @@ from podkop_sub.notify import Notifier
 from podkop_sub.router import Router
 from podkop_sub.state import State
 from podkop_sub.subscription import SubscriptionError
+from podkop_sub.sources import Fetched
 from podkop_sub.sync import run_sync
 
 sys.path.insert(0, str(Path(__file__).parent))
@@ -36,6 +37,12 @@ class Sink:
     def send(self, text, kind="change"):
         self.msgs.append((kind, text))
         return True
+
+
+def fetched_from(links, name="main"):
+    """Имитация скачанной подписки: все ссылки принадлежат одному источнику."""
+    return Fetched(sources={}, ok=[name], errors={}, raw_links=list(links),
+                   owner_of={l.key: name for l in links}, links=list(links))
 
 
 class SyncBase(unittest.TestCase):
@@ -59,12 +66,14 @@ class SyncBase(unittest.TestCase):
         self.cfg["sync"]["probe"] = "off"  # сценарии синхронизации; проверка кандидатов — в ProbeTests
         self.router = Router("fake", section="Proxy")
         self.st = State(self.tmp / "state.json")
+        # NL и DE взяты из подписки «main»; FR (MANUAL) добавлена вручную
+        self.st["owners"] = {parse_link(NL()).id: "main", parse_link(DE()).id: "main"}
         self.sink = Sink()
         self.sleeps = []
 
     def run_sync(self, sub, **kw):
-        links = parse_many(sub)
-        return run_sync(self.cfg, self.router, self.st, self.sink, lambda: links, sleep=self.sleeps.append,
+        fetched = fetched_from(parse_many(sub))
+        return run_sync(self.cfg, self.router, self.st, self.sink, lambda: fetched, sleep=self.sleeps.append,
                         now=kw.pop("now", 1_000_000.0), **kw)
 
     def dead(self, *hosts):
@@ -175,7 +184,7 @@ class SyncTests(SyncBase):
 
     def test_subscription_failure_counts_and_notifies_at_threshold(self):
         def boom():
-            raise SubscriptionError("HTTP 500")
+            return Fetched(sources={}, ok=[], errors={"main": "HTTP 500"})
         self.cfg["notify"]["error_threshold"] = 2
         for i in range(2):
             rc = run_sync(self.cfg, self.router, self.st, self.sink, boom,
@@ -185,6 +194,111 @@ class SyncTests(SyncBase):
         self.assertEqual(len(self.sink.msgs), 1)
         self.assertEqual(self.run_sync([NL(sni="a.ru"), DE(sni="a.ru")]), 0)
         self.assertEqual(self.st["fetch_failures"], 0)
+
+
+class SyncOwnershipTests(SyncBase):
+    def setUp(self):
+        super().setUp()
+        self.cfg.subscriptions.extend([{"name": "main", "url": "u1", "enabled": True},
+                                       {"name": "extra", "url": "u2", "enabled": True}])
+
+    def run_fetched(self, res, **kw):
+        return run_sync(self.cfg, self.router, self.st, self.sink, lambda: res, sleep=self.sleeps.append,
+                        now=kw.pop("now", 1_000_000.0), **kw)
+
+    def owners(self):
+        return self.st["owners"]
+
+    def test_links_of_unavailable_subscription_are_kept(self):
+        self.st["owners"][parse_link(DE()).id] = "extra"
+        res = fetched_from([parse_link(NL())], "main")
+        res.errors["extra"] = "HTTP 500"
+        self.assertEqual(self.run_fetched(res), 0)
+        self.assertIn("192.0.2.2", self.stored_hosts())  # DE не удалена: её подписка не скачалась
+        self.assertEqual(self.owners()[parse_link(DE()).id], "extra")
+
+    def test_link_of_available_subscription_is_removed_when_gone(self):
+        self.assertEqual(self.run_fetched(fetched_from([parse_link(NL())], "main")), 0)
+        self.assertNotIn("192.0.2.2", self.stored_hosts())   # DE принадлежала main, main её больше не отдаёт
+        self.assertNotIn(parse_link(DE()).id, self.owners())
+
+    def test_manual_link_missing_from_subscriptions_is_never_removed(self):
+        self.cfg["protect"]["links"] = []  # ручная FR больше не защищена, но без владельца
+        self.assertEqual(self.run_fetched(fetched_from([parse_link(NL())], "main")), 0)
+        self.assertIn("192.0.2.9", self.stored_hosts())      # FR осталась: владельца у неё нет
+        self.assertNotIn(parse_link(MANUAL).id, self.owners())
+
+    def test_owner_follows_the_subscription_that_now_provides_the_link(self):
+        self.st["owners"][parse_link(NL()).id] = "extra"
+        res = fetched_from([parse_link(NL()), parse_link(DE())], "main")
+        res.errors["extra"] = "down"
+        self.assertEqual(self.run_fetched(res), 0)
+        self.assertEqual(self.owners()[parse_link(NL()).id], "main")
+        self.assertEqual(self.owners()[parse_link(DE()).id], "main")
+
+    def test_added_link_gets_its_subscription_as_owner(self):
+        res = fetched_from([parse_link(NL()), parse_link(DE()), parse_link(JP())], "main")
+        self.cfg["filters"]["prefer_countries"] = []
+        self.assertEqual(self.run_fetched(res), 0)
+        self.assertIn("192.0.2.4", self.stored_hosts())
+        self.assertEqual(self.owners()[parse_link(JP()).id], "main")
+
+    def test_retry_only_when_nothing_was_downloaded(self):
+        attempts = []
+
+        def flaky():
+            attempts.append(1)
+            if len(attempts) < 3:
+                return Fetched(ok=[], errors={"main": "HTTP 500"})
+            return fetched_from([parse_link(NL()), parse_link(DE())], "main")
+
+        self.assertEqual(run_sync(self.cfg, self.router, self.st, self.sink, flaky,
+                                  sleep=self.sleeps.append, now=1_000_000.0), 0)
+        self.assertEqual(len(attempts), 3)
+        self.assertEqual(self.sleeps, [10, 10])
+
+    def test_partial_success_does_not_retry(self):
+        calls = []
+
+        def partial():
+            calls.append(1)
+            res = fetched_from([parse_link(NL()), parse_link(DE())], "main")
+            res.errors["extra"] = "HTTP 500"
+            return res
+
+        self.assertEqual(run_sync(self.cfg, self.router, self.st, self.sink, partial,
+                                  sleep=self.sleeps.append, now=1_000_000.0), 0)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(self.sleeps, [])
+
+    def test_failed_subscriptions_all_counts_as_error(self):
+        def down():
+            return Fetched(ok=[], errors={"main": "x", "extra": "y"})
+
+        self.assertEqual(run_sync(self.cfg, self.router, self.st, self.sink, down,
+                                  sleep=lambda s: None, now=1e6), 1)
+        self.assertEqual(self.st["fetch_failures"], 1)
+
+
+class OwnerPlanTests(unittest.TestCase):
+    def test_build_plan_without_owners_removes_nothing(self):
+        from podkop_sub.sync import Entry, build_plan
+        cur = parse_link(NL(sni="old.ru"))
+        e = Entry(cur.raw, cur, cur.id, False)
+        plan = build_plan([e], [], prefer=[], replaced_at={}, now=1e6, cooldown_s=0,
+                          remove_missing=True, active_tag=None)
+        self.assertEqual(plan.removed, [])
+        self.assertEqual(plan.new, [cur.raw])
+
+    def test_build_plan_removes_only_owned_by_ok_source(self):
+        from podkop_sub.sync import Entry, build_plan
+        cur = parse_link(NL())
+        e = Entry(cur.raw, cur, cur.id, False)
+        kwargs = dict(prefer=[], replaced_at={}, now=1e6, cooldown_s=0, remove_missing=True, active_tag=None)
+        plan = build_plan([e], [], owners={cur.id: "main"}, ok_sources={"main"}, **kwargs)
+        self.assertEqual(plan.removed, [cur.raw])
+        plan = build_plan([e], [], owners={cur.id: "main"}, ok_sources=set(), **kwargs)
+        self.assertEqual(plan.removed, [])
 
 
 class ProbeTests(unittest.TestCase):

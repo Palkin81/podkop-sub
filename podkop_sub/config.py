@@ -12,7 +12,9 @@ CONFIG_DIR = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / 
 CONFIG_PATH = CONFIG_DIR / "config.toml"
 
 DEFAULTS: dict = {
-    "subscription": {"url": "", "user_agent": "podkop-sub/1.0", "timeout": 20},
+    # подписки: [[subscriptions]] name / url / enabled; все попадают в одну секцию podkop
+    "subscriptions": [],
+    "fetch": {"user_agent": "podkop-sub/1.0", "timeout": 20},
     "router": {
         "host": "",
         "port": 22,
@@ -74,6 +76,12 @@ def _val(v) -> str:
 def dumps(cfg: dict) -> str:
     out = []
     for section, values in cfg.items():
+        if isinstance(values, list):  # массив таблиц: [[subscriptions]]
+            for item in values:
+                out.append(f"[[{section}]]")
+                out.extend(f"{k} = {_val(v)}" for k, v in item.items())
+                out.append("")
+            continue
         out.append(f"[{section}]")
         out.extend(f"{k} = {_val(v)}" for k, v in values.items())
         out.append("")
@@ -85,10 +93,26 @@ class Config:
         self.path = Path(path) if path else CONFIG_PATH
         self.data = copy.deepcopy(DEFAULTS)
         self.exists = False
+        self.migrated = False
         if self.path.is_file():
             with open(self.path, "rb") as fh:
-                _merge(self.data, tomllib.load(fh))
+                raw = tomllib.load(fh)
+            _merge(self.data, raw)
+            self._migrate(raw)
             self.exists = True
+
+    def _migrate(self, raw: dict) -> None:
+        """Старый конфиг с одной подпиской ([subscription]) превращаем в список из одного источника."""
+        legacy = raw.get("subscription")
+        if not isinstance(legacy, dict):
+            return
+        if "subscriptions" not in raw and legacy.get("url"):
+            self.data["subscriptions"] = [{"name": "main", "url": str(legacy["url"]), "enabled": True}]
+        for key in ("user_agent", "timeout"):
+            if key in legacy:
+                self.data["fetch"][key] = legacy[key]
+        self.data.pop("subscription", None)
+        self.migrated = True
 
     def __getitem__(self, section: str) -> dict:
         return self.data[section]
@@ -103,8 +127,13 @@ class Config:
         self.exists = True
 
     @property
+    def subscriptions(self) -> list[dict]:
+        return self.data["subscriptions"]
+
+    @property
     def configured(self) -> bool:
-        return self.exists and bool(self.data["subscription"]["url"]) and bool(self.data["router"]["host"])
+        has_url = any(s.get("url") for s in self.subscriptions)
+        return self.exists and has_url and bool(self.data["router"]["host"])
 
     def expand(self, section: str, key: str) -> Path:
         return Path(os.path.expanduser(self.data[section][key]))

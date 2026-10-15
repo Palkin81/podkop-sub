@@ -17,7 +17,8 @@ from .links import Link, apply_filters, compute, countries, diff, parse_link, ra
 from .notify import Notifier
 from .router import Router, RouterError
 from .state import state_for
-from .subscription import Subscription, SubscriptionError, describe_meta, fetch
+from .sources import Fetched, fetch_all, reconcile_owners
+from .subscription import SubscriptionError, describe_meta, fetch
 from .sync import (RunLock, apply_and_verify, format_entry, inspect, label_of,
                    protect_record, protected_ids, run_sync)
 
@@ -52,14 +53,41 @@ def make_router(cfg: Config) -> Router:
     return Router(r["host"], r["port"], r["user"], r["key_path"], r["section"])
 
 
-def get_subscription(cfg: Config) -> Subscription:
-    s = cfg["subscription"]
-    return fetch(s["url"], s["user_agent"], s["timeout"])
+def load_fetched(cfg: Config) -> Fetched:
+    """Скачивает все включённые подписки. Бросает ошибку, только если не скачалась ни одна."""
+    fetched = fetch_all(cfg)
+    fetched.require()
+    return fetched
 
 
-def visible_links(cfg: Config, sub: Subscription) -> list[Link]:
-    f = cfg["filters"]
-    return apply_filters(sub.links, f["types"], f["exclude_countries"], f["prefer_countries"])
+def print_sources(fetched: Fetched, printer=print) -> None:
+    for name, got in fetched.sources.items():
+        if isinstance(got, SubscriptionError):
+            printer(_("Subscription «{name}»: unavailable ({e})").format(name=name, e=got))
+            continue
+        meta = describe_meta(got.meta)
+        printer(_("Subscription «{name}»: {n} links").format(name=name, n=len(got.links))
+                + (f" ({meta})" if meta else ""))
+
+
+def failed_owned_ids(cfg: Config, current: list[str], fetched: Fetched) -> set[str]:
+    """Ссылки на роутере, принадлежащие подпискам, которые сейчас не скачались: их не трогаем."""
+    if not fetched.errors:
+        return set()
+    owners = state_for(cfg)["owners"]
+    out = set()
+    for raw in current:
+        link = parse_link(raw)
+        if link and owners.get(link.id) in fetched.errors:
+            out.add(raw_id(raw))
+    return out
+
+
+def record_owners(cfg: Config, new: list[str], owner_of: dict | None = None) -> None:
+    state = state_for(cfg)
+    configured = {s["name"] for s in cfg.subscriptions}
+    state["owners"] = reconcile_owners(new, state["owners"], owner_of or {}, configured)
+    state.save()
 
 
 def print_diff(old: list[str], new: list[str], emoji: bool = True) -> None:
@@ -71,17 +99,19 @@ def print_diff(old: list[str], new: list[str], emoji: bool = True) -> None:
         a=len(d["added"]), u=len(d["updated"]), r=len(d["removed"]), s=len(d["same"])))
 
 
-def compute_protected(cfg: Config, current: list[str], selected: list[Link], action: str) -> list[str]:
-    """compute(), but protected links stay as they are for any action."""
+def compute_protected(cfg: Config, current: list[str], selected: list[Link], action: str,
+                      keep: set[str] = frozenset()) -> list[str]:
+    """compute(), but protected links (and links of unavailable subscriptions) stay as they are."""
     new = compute(current, selected, action)
-    prot = protected_ids(cfg)
+    prot = protected_ids(cfg) | set(keep)
     kept = {raw_id(r): r for r in current if raw_id(r) in prot}
     new = [kept.get(raw_id(r), r) for r in new]
     present = {raw_id(r) for r in new}
     return [r for pid, r in kept.items() if pid not in present] + new
 
 
-def write_links(cfg: Config, router: Router, new: list[str], dry_run: bool = False) -> bool:
+def write_links(cfg: Config, router: Router, new: list[str], dry_run: bool = False,
+                owner_of: dict | None = None) -> bool:
     if dry_run:
         print(_("Dry run: nothing was written to the router."))
         return False
@@ -90,6 +120,7 @@ def write_links(cfg: Config, router: Router, new: list[str], dry_run: bool = Fal
     router.set_links(new)
     if router.get_links() != new:
         raise RouterError(_("After writing, the list on the router differs from the expected one"))
+    record_owners(cfg, new, owner_of)
     print(_("Done: section {section} now has {n} links. Podkop has not applied the changes yet.")
           .format(section=router.section, n=len(new)))
     return True
@@ -104,17 +135,16 @@ def apply_now(cfg: Config, router: Router, new: list[str]) -> bool:
 
 # --- non-interactive commands ----------------------------------------------
 def cmd_list(cfg: Config) -> int:
-    sub = get_subscription(cfg)
-    meta = describe_meta(sub.meta)
-    print(_("Links in subscription: {n}").format(n=len(sub.links)) + (f" ({meta})" if meta else ""))
-    for l in visible_links(cfg, sub):
+    fetched = load_fetched(cfg)
+    print_sources(fetched)
+    for l in fetched.links:
         print(f"  {l.label(cfg['ui']['show_emoji'])}  {l.host}:{l.port}")
     return 0
 
 
 def cmd_update(cfg: Config, args: argparse.Namespace) -> int:
-    sub = get_subscription(cfg)
-    links = visible_links(cfg, sub)
+    fetched = load_fetched(cfg)
+    links = fetched.links
     prefer = {c.upper() for c in cfg["filters"]["prefer_countries"]}
     if args.only_preferred and prefer:
         links = [l for l in links if (l.cc or "??") in prefer]
@@ -124,12 +154,13 @@ def cmd_update(cfg: Config, args: argparse.Namespace) -> int:
     router = make_router(cfg)
     current = router.get_links()
     action = args.action or cfg["update"]["action"]
-    new = compute_protected(cfg, current, links, action)
+    keep = failed_owned_ids(cfg, current, fetched)
+    new = compute_protected(cfg, current, links, action, keep)
     if set(new) == set(current):
         print(_("No changes."))
         return 0
     print_diff(current, new, cfg["ui"]["show_emoji"])
-    if write_links(cfg, router, new, dry_run=args.dry_run) and args.restart:
+    if write_links(cfg, router, new, dry_run=args.dry_run, owner_of=fetched.owner_of) and args.restart:
         return 0 if apply_now(cfg, router, new) else 2
     return 0
 
@@ -142,7 +173,7 @@ def cmd_sync(cfg: Config, args: argparse.Namespace) -> int:
             print(_("Another run is already in progress, exiting."))
             return 0
         return run_sync(cfg, router, state, Notifier(cfg),
-                        lambda: visible_links(cfg, get_subscription(cfg)),
+                        lambda: fetch_all(cfg),
                         dry_run=args.dry_run)
 
 
@@ -172,7 +203,9 @@ def check_subscription(cfg: Config, printer=print) -> int:
     from .probe import Prober
     router = make_router(cfg)
     emoji = cfg["ui"]["show_emoji"]
-    sub_links = visible_links(cfg, get_subscription(cfg))
+    fetched = load_fetched(cfg)
+    print_sources(fetched, printer)
+    sub_links = fetched.links
     current = {parse_link(r).key for r in router.get_links() if parse_link(r)}
     cands = [l for l in sub_links if l.key not in current]
     if not cands:
@@ -216,14 +249,17 @@ def cmd_rollback(cfg: Config) -> int:
 
 
 # --- setup wizard ----------------------------------------------------------
-def ensure_sub(cfg: Config, state: dict) -> Subscription | None:
-    if state.get("sub") is None:
+def ensure_fetched(cfg: Config, state: dict) -> Fetched | None:
+    """Скачанные подписки на время одного шага меню (чтобы не качать каждый раз)."""
+    if state.get("fetched") is None:
         try:
-            state["sub"] = get_subscription(cfg)
+            fetched = load_fetched(cfg)
         except SubscriptionError as exc:
             print(_("Error: {e}").format(e=exc))
             return None
-    return state["sub"]
+        print_sources(fetched)
+        state["fetched"] = fetched
+    return state["fetched"]
 
 
 def step_language(cfg: Config, state: dict) -> str:
@@ -237,19 +273,23 @@ def step_language(cfg: Config, state: dict) -> str:
 
 
 def step_subscription(cfg: Config, state: dict) -> str:
+    """Первая подписка. Остальные добавляются в Настройках → Подписки."""
     from . import ui
     while True:
-        url = ui.text(_("Subscription link:"), cfg["subscription"]["url"])
+        subs = cfg.subscriptions
+        url = ui.text(_("Subscription link:"), subs[0]["url"] if subs else "")
         if url is None:
             return "back"
-        cfg["subscription"]["url"] = url.strip()
-        state["sub"] = None
-        sub = ensure_sub(cfg, state)
-        if sub:
-            meta = describe_meta(sub.meta)
-            types = sorted({l.scheme for l in sub.links})
-            print(_("Links received: {n} (types: {types})").format(n=len(sub.links), types=", ".join(types))
-                  + (f", {meta}" if meta else ""))
+        if subs:
+            subs[0]["url"] = url.strip()
+        else:
+            subs.append({"name": "main", "url": url.strip(), "enabled": True})
+        state["fetched"] = None
+        fetched = ensure_fetched(cfg, state)
+        if fetched:
+            types = sorted({l.scheme for l in fetched.raw_links})
+            print(_("Links received: {n} (types: {types})").format(
+                n=len(fetched.raw_links), types=", ".join(types)))
             return "next"
 
 
@@ -331,11 +371,11 @@ def step_section(cfg: Config, state: dict) -> str:
 
 def step_types(cfg: Config, state: dict) -> str:
     from . import ui
-    sub = ensure_sub(cfg, state)
+    sub = ensure_fetched(cfg, state)
     if sub is None:
         return "back"
     counts: dict[str, int] = {}
-    for l in sub.links:
+    for l in sub.raw_links:
         counts[l.scheme] = counts.get(l.scheme, 0) + 1
     chosen = set(cfg["filters"]["types"])
     while True:
@@ -359,10 +399,10 @@ def _country_items(links: list[Link], selected: set[str], emoji: bool):
 
 def step_exclude(cfg: Config, state: dict) -> str:
     from . import ui
-    sub = ensure_sub(cfg, state)
+    sub = ensure_fetched(cfg, state)
     if sub is None:
         return "back"
-    links = apply_filters(sub.links, cfg["filters"]["types"], [], [])
+    links = apply_filters(sub.raw_links, cfg["filters"]["types"], [], [])
     res = ui.checkbox(_("Excluded countries (their links will not be shown):"),
                       _country_items(links, set(cfg["filters"]["exclude_countries"]),
                                      cfg["ui"]["show_emoji"]))
@@ -374,10 +414,10 @@ def step_exclude(cfg: Config, state: dict) -> str:
 
 def step_prefer(cfg: Config, state: dict) -> str:
     from . import ui
-    sub = ensure_sub(cfg, state)
+    sub = ensure_fetched(cfg, state)
     if sub is None:
         return "back"
-    links = apply_filters(sub.links, cfg["filters"]["types"],
+    links = apply_filters(sub.raw_links, cfg["filters"]["types"],
                           cfg["filters"]["exclude_countries"], [])
     res = ui.checkbox(_("Preferred countries (listed first and pre-selected):"),
                       _country_items(links, set(cfg["filters"]["prefer_countries"]),
@@ -399,8 +439,8 @@ def step_protect(cfg: Config, state: dict) -> str:
               _("You can set up the protected list later: Settings → Protected links.") + "\n" +
               _("Until it is set up, scheduled runs will not change anything."))
         return "next"
-    sub = ensure_sub(cfg, state)
-    sub_keys = {l.key for l in sub.links} if sub else set()
+    sub = ensure_fetched(cfg, state)
+    sub_keys = {l.key for l in sub.raw_links} if sub else set()
     stored = {s.split()[0]: s for s in cfg["protect"]["links"] if s.strip()}
     reviewed = cfg["protect"]["reviewed"]
     items, seen = [], set()
@@ -443,7 +483,7 @@ WIZARD_STEPS = [step_language, step_subscription, step_router, step_section,
 
 def wizard(cfg: Config) -> bool:
     snapshot = copy.deepcopy(cfg.data)
-    state: dict = {"sub": None}
+    state: dict = {"fetched": None}
     i = 0
     print(_("\n=== Initial setup ===  (Ctrl+C at a prompt — go back one step)\n"))
     while 0 <= i < len(WIZARD_STEPS):
@@ -471,16 +511,17 @@ def pick_links(cfg: Config, links: list[Link]):
 def flow_update(cfg: Config) -> None:
     from . import ui
     emoji = cfg["ui"]["show_emoji"]
-    sub = get_subscription(cfg)
-    meta = describe_meta(sub.meta)
-    if meta:
-        print(_("Subscription: {meta}").format(meta=meta))
-    links = visible_links(cfg, sub)
+    fetched = load_fetched(cfg)
+    print_sources(fetched)
+    links = fetched.links
     if not links:
         print(_("No links left after filters (check Settings → Filters)."))
         return
     router = make_router(cfg)
     current = router.get_links()
+    keep = failed_owned_ids(cfg, current, fetched)
+    if keep:
+        print(_("Links of unavailable subscriptions stay on the router as they are."))
     step, selected, action, new = 0, [], cfg["update"]["action"], []
     while True:
         if step == 0:
@@ -499,7 +540,7 @@ def flow_update(cfg: Config) -> None:
                 continue
             action, step = res, 2
         else:
-            new = compute_protected(cfg, current, selected, action)
+            new = compute_protected(cfg, current, selected, action, keep)
             print()
             if set(new) == set(current):
                 print(_("No changes."))
@@ -508,7 +549,7 @@ def flow_update(cfg: Config) -> None:
             res = ui.select(_("Write changes to the config?"),
                             [(_("Write"), "ok")], back_label=_("← Back to action"))
             if res == "ok":
-                write_links(cfg, router, new)
+                write_links(cfg, router, new, owner_of=fetched.owner_of)
                 if ui.confirm(_("Apply now (podkop {method} with verification)?").format(
                         method=cfg["apply"]["method"]), True):
                     apply_now(cfg, router, new)
@@ -607,10 +648,10 @@ def flow_backups(cfg: Config) -> None:
 
 
 def flow_subscription_view(cfg: Config) -> None:
-    sub = get_subscription(cfg)
-    meta = describe_meta(sub.meta)
-    print(_("\nLinks in subscription: {n}").format(n=len(sub.links)) + (f" ({meta})" if meta else ""))
-    for l in sub.links:
+    fetched = load_fetched(cfg)
+    print()
+    print_sources(fetched)
+    for l in fetched.raw_links:
         print(f"  {l.label(cfg['ui']['show_emoji'])}  {l.host}:{l.port}")
 
 
@@ -833,7 +874,7 @@ def schedule_edit(cfg: Config) -> None:
         print(_("Warning: cron not found, install it: apt install cron"))
     if not cfg["protect"]["reviewed"] and ui.confirm(
             _("The protected list is not set up yet, without it a run does nothing. Set it up now?"), True):
-        if step_protect(cfg, {"sub": None}) == "next":
+        if step_protect(cfg, {"fetched": None}) == "next":
             cfg.save()
     if not Notifier(cfg).enabled and ui.confirm(_("Set up Telegram notifications now?"), False):
         notify_menu(cfg)
@@ -878,14 +919,136 @@ def schedule_menu(cfg: Config) -> None:
         guarded(fn, cfg)
 
 
+# --- subscriptions ---------------------------------------------------------
+def _short(url: str, n: int = 48) -> str:
+    return url if len(url) <= n else url[: n - 1] + "…"
+
+
+def _free_name(cfg: Config) -> str:
+    used = {s["name"] for s in cfg.subscriptions}
+    for cand in ["main"] + [f"sub{i}" for i in range(2, 100)]:
+        if cand not in used:
+            return cand
+    return "sub"
+
+
+def _name_ok(cfg: Config, name: str, current: str | None = None) -> bool:
+    if not name:
+        print(_("The name cannot be empty."))
+        return False
+    if any(s["name"] == name and s["name"] != current for s in cfg.subscriptions):
+        print(_("A subscription with this name already exists."))
+        return False
+    return True
+
+
+def add_subscription(cfg: Config) -> None:
+    from . import ui
+    url = ui.text(_("Subscription link:"))
+    if not url or not url.strip():
+        return
+    default = _free_name(cfg)
+    while True:
+        name = ui.text(_("Name for this subscription:"), default)
+        if name is None:
+            return
+        name = name.strip()
+        if _name_ok(cfg, name):
+            break
+    cfg.subscriptions.append({"name": name, "url": url.strip(), "enabled": True})
+    cfg.save()
+    print(_("Subscription «{name}» added.").format(name=name))
+
+
+def show_source(cfg: Config, src: dict) -> None:
+    try:
+        got = fetch(src["url"], cfg["fetch"]["user_agent"], cfg["fetch"]["timeout"])
+    except SubscriptionError as exc:
+        print(_("Error: {e}").format(e=exc))
+        return
+    print_sources(Fetched(sources={src["name"]: got}))
+    f = cfg["filters"]
+    for l in apply_filters(got.links, f["types"], f["exclude_countries"], f["prefer_countries"]):
+        print(f"  {l.label(cfg['ui']['show_emoji'])}  {l.host}:{l.port}")
+
+
+def delete_subscription(cfg: Config, idx: int) -> bool:
+    from . import ui
+    name = cfg.subscriptions[idx]["name"]
+    print(_("Links taken from «{name}» become manual: the script will no longer remove them.").format(name=name))
+    if not ui.confirm(_("Delete subscription «{name}»?").format(name=name), False):
+        return False
+    del cfg.subscriptions[idx]
+    state = state_for(cfg)
+    state["owners"] = {k: v for k, v in state["owners"].items() if v != name}
+    state.save()
+    cfg.save()
+    return True
+
+
+def source_menu(cfg: Config, idx: int) -> None:
+    from . import ui
+    while idx < len(cfg.subscriptions):
+        src = cfg.subscriptions[idx]
+        on = src.get("enabled", True)
+        choice = ui.select(_("Subscription «{name}»").format(name=src["name"]), [
+            (_("Show links"), "show"),
+            (_("Name: {name}").format(name=src["name"]), "name"),
+            (_("Link: {url}").format(url=_short(src["url"], 60)), "url"),
+            (_("Enabled: {v}").format(v=on_off(on)), "toggle"),
+            (_("Delete…"), "delete"),
+        ])
+        if choice == ui.BACK:
+            return
+        if choice == "show":
+            show_source(cfg, src)
+        elif choice == "name":
+            name = ui.text(_("Name for this subscription:"), src["name"])
+            if name is None or not _name_ok(cfg, name.strip(), src["name"]):
+                continue
+            old, src["name"] = src["name"], name.strip()
+            state = state_for(cfg)
+            state["owners"] = {k: (src["name"] if v == old else v) for k, v in state["owners"].items()}
+            state.save()
+            cfg.save()
+        elif choice == "url":
+            url = ui.text(_("Subscription link:"), src["url"])
+            if url is not None and url.strip():
+                src["url"] = url.strip()
+                cfg.save()
+        elif choice == "toggle":
+            src["enabled"] = not on
+            cfg.save()
+        elif choice == "delete":
+            if delete_subscription(cfg, idx):
+                return
+
+
+def subscriptions_menu(cfg: Config) -> None:
+    from . import ui
+    while True:
+        subs = cfg.subscriptions
+        items = [(_("+ Add subscription"), "add")]
+        for i, s in enumerate(subs):
+            off = "" if s.get("enabled", True) else _(" (off)")
+            items.append((f"{s['name']}{off}: {_short(s['url'])}", i))
+        choice = ui.select(_("Subscriptions ({n})").format(n=len(subs)), items)
+        if choice == ui.BACK:
+            return
+        if choice == "add":
+            add_subscription(cfg)
+        else:
+            source_menu(cfg, choice)
+
+
 # --- settings --------------------------------------------------------------
 def settings_menu(cfg: Config) -> None:
     from . import ui
-    state: dict = {"sub": None}
+    state: dict = {"fetched": None}
     while True:
         f = cfg["filters"]
         choice = ui.select(_("Settings"), [
-            (_("Subscription link"), "sub"),
+            (_("Subscriptions: {n}").format(n=len(cfg.subscriptions)), "subs"),
             (_("Router: {user}@{host}:{port}").format(user=cfg['router']['user'], host=cfg['router']['host'],
                                                        port=cfg['router']['port']), "router"),
             (_("Podkop section: {section}").format(section=cfg['router']['section']), "section"),
@@ -909,6 +1072,8 @@ def settings_menu(cfg: Config) -> None:
             cfg["ui"]["language"] = "en" if cfg["ui"]["language"] == "ru" else "ru"
             set_language(cfg["ui"]["language"])
             cfg.save()
+        elif choice == "subs":
+            subscriptions_menu(cfg)
         elif choice == "syncset":
             sync_settings_menu(cfg)
         elif choice == "notify":
@@ -922,7 +1087,7 @@ def settings_menu(cfg: Config) -> None:
             cfg["ui"]["show_emoji"] = not cfg["ui"]["show_emoji"]
             cfg.save()
         else:
-            step = {"sub": step_subscription, "router": step_router, "section": step_section,
+            step = {"router": step_router, "section": step_section,
                     "types": step_types, "exclude": step_exclude, "prefer": step_prefer,
                     "protect": step_protect}[choice]
             try:
@@ -930,7 +1095,7 @@ def settings_menu(cfg: Config) -> None:
                     cfg.save()
             except HANDLED as exc:
                 print(_("Error: {e}").format(e=exc))
-        state["sub"] = None
+        state["fetched"] = None
 
 
 def guarded(fn, *a) -> None:
