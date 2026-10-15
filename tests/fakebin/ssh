@@ -1,0 +1,10 @@
+#!/bin/sh
+# Фейковый ssh для тестов: пропускает опции и выполняет команду локально.
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -i|-p|-o) shift 2 ;;
+    *@*) shift; break ;;
+    *) shift ;;
+  esac
+done
+exec sh -c "$*"

@@ -1,0 +1,72 @@
+#!/usr/bin/env python3
+"""Минимальная имитация uci для тестов (show/delete/add_list/commit/revert)."""
+import json
+import os
+import sys
+
+state_dir = os.environ["FAKE_UCI_DIR"]
+committed_p = os.path.join(state_dir, "committed.json")
+staged_p = os.path.join(state_dir, "staged.json")
+conf_file = os.environ.get("PODKOP_SUB_CONFIG_FILE")
+
+
+def load(p):
+    with open(p, encoding="utf-8") as fh:
+        return json.load(fh)
+
+
+def save(p, data):
+    with open(p, "w", encoding="utf-8") as fh:
+        json.dump(data, fh, ensure_ascii=False)
+
+
+def q(v):
+    return "'" + v.replace("'", "'\\''") + "'"
+
+
+args = [a for a in sys.argv[1:] if a != "-q"]
+cmd, rest = args[0], args[1:]
+if not os.path.exists(staged_p):
+    save(staged_p, load(committed_p))
+data = load(staged_p)
+
+if cmd == "show":
+    parts = rest[0].split(".")
+    if len(parts) == 1:
+        for name, sec in data.items():
+            print(f"podkop.{name}=section")
+            for k, v in sec.items():
+                print(f"podkop.{name}.{k}=" + (" ".join(q(x) for x in v) if isinstance(v, list) else q(v)))
+    else:
+        sec, opt = parts[1], parts[2]
+        v = data.get(sec, {}).get(opt)
+        if v is None:
+            sys.exit(1)
+        print(f"podkop.{sec}.{opt}=" + (" ".join(q(x) for x in v) if isinstance(v, list) else q(v)))
+elif cmd == "delete":
+    _, sec, opt = rest[0].split(".")
+    if opt not in data.get(sec, {}):
+        sys.exit(1)
+    del data[sec][opt]
+    save(staged_p, data)
+elif cmd == "add_list":
+    path, _, value = rest[0].partition("=")
+    _, sec, opt = path.split(".")
+    data[sec].setdefault(opt, []).append(value)
+    save(staged_p, data)
+elif cmd == "commit":
+    save(committed_p, data)
+    if conf_file:
+        lines = []
+        for name, sec in data.items():
+            lines.append(f"config section '{name}'")
+            for k, v in sec.items():
+                for item in (v if isinstance(v, list) else [v]):
+                    lines.append(f"\t{'list' if isinstance(v, list) else 'option'} {k} {q(item)}")
+            lines.append("")
+        with open(conf_file, "w", encoding="utf-8") as fh:
+            fh.write("\n".join(lines))
+elif cmd == "revert":
+    save(staged_p, load(committed_p))
+else:
+    sys.exit(2)

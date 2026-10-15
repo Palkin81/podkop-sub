@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "podkop-sub"
+version = "1.0.0"
+description = "Import VLESS links from a subscription into a podkop section on OpenWrt (menu, sync, schedule, Telegram)"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.11"
+dependencies = ["questionary>=2.0"]
+keywords = ["openwrt", "podkop", "sing-box", "vless", "subscription"]
+
+[project.scripts]
+podkop-sub = "podkop_sub.cli:main"
+
+[tool.setuptools]
+packages = ["podkop_sub"]

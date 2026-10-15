@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+build/
+dist/
+*.egg-info/
+.idea/
+.vscode/
+# local config and state contain the subscription token and the router key
+config.toml
+*.tmp

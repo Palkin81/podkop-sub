@@ -1,0 +1,19 @@
+#!/usr/bin/env python3
+"""Фейковый /etc/init.d/podkop: reload/restart пересобирают running.json из uci."""
+import json, os, re, sys
+from urllib.parse import parse_qs, urlsplit
+d = os.environ["FAKE_UCI_DIR"]
+if sys.argv[1] == "reload" and os.path.exists(os.path.join(d, "reload_noop")):
+    sys.exit(0)
+links = json.load(open(os.path.join(d, "committed.json")))["Proxy"]["selector_proxy_links"]
+obs = []
+for i, raw in enumerate(links, 1):
+    u = urlsplit(raw)
+    q = parse_qs(u.query)
+    obs.append({"tag": f"Proxy-{i}-out", "type": "vless", "server": u.hostname,
+                "server_port": u.port,
+                "tls": {"server_name": (q.get("sni") or [""])[0],
+                        "reality": {"short_id": (q.get("sid") or [""])[0]}}})
+obs.append({"tag": "Proxy-out", "type": "selector"})
+json.dump({"outbounds": obs}, open(os.environ["PODKOP_SUB_SINGBOX_CONFIG"], "w"))
+open(os.path.join(d, "active"), "w").write("Proxy-1-out")

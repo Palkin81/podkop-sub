@@ -1,0 +1,29 @@
+#!/usr/bin/env python3
+"""Фейковый sing-box для тестов: `run -c config.json` поднимает HTTP-прокси на listen_port.
+Серверы из FAKE_SINGBOX_BAD (через запятую) не отвечают: прокси отдаёт 502."""
+import json, os, socketserver, sys
+from http.server import BaseHTTPRequestHandler
+
+cfg = json.load(open(sys.argv[sys.argv.index("-c") + 1]))
+port = cfg["inbounds"][0]["listen_port"]
+server = cfg["outbounds"][0]["server"]
+bad = set(filter(None, os.environ.get("FAKE_SINGBOX_BAD", "").split(",")))
+
+
+class H(BaseHTTPRequestHandler):
+    def do_GET(self):
+        code = 502 if server in bad else 204
+        self.send_response(code)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    def log_message(self, *a):
+        pass
+
+
+class S(socketserver.ThreadingTCPServer):
+    allow_reuse_address = True
+    daemon_threads = True
+
+
+S(("127.0.0.1", port), H).serve_forever()
