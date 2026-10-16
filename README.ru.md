@@ -15,7 +15,7 @@ English version: [README.md](README.md).
 
 ## Установка (Debian 12/13 или Ubuntu, от root)
 
-    git clone https://github.com/<you>/podkop-sub.git
+    git clone https://github.com/Palkin81/podkop-sub.git
     cd podkop-sub
     sh install.sh            # ставит в /opt/podkop-sub, команда podkop-sub
     podkop-sub               # первый запуск откроет мастер настройки
