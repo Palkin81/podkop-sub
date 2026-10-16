@@ -322,4 +322,6 @@ RU: dict[str, str] = {
     "Excluded countries": "Страны-исключения",
     "Preferred countries": "Страны-предпочтения",
     "Protected links": "Защищённые ссылки",
+    "could not read file: {e}": "Не удалось прочитать файл: {e}",
+    "file not found: {p}": "Файл не найден: {p}",
 }

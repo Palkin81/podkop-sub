@@ -8,6 +8,7 @@ import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
 from datetime import datetime
+from pathlib import Path
 
 from .links import LINK_RE, Link, parse_many
 from .i18n import _
@@ -110,22 +111,87 @@ def _parse_userinfo(header: str | None) -> dict:
     return meta
 
 
+def _load_file_links(path: Path) -> list[str]:
+    """Читает файл со ссылками: одна ссылка на строку (vless://, vmess://, и т.д.).
+    Пустые строки и комментарии (#) игнорируются."""
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        raise SubscriptionError(_("could not read file: {e}").format(e=exc)) from exc
+    lines = [ln.strip() for ln in text.splitlines()]
+    links = [ln for ln in lines if LINK_RE.match(ln)]
+    if not links:
+        raise SubscriptionError(_("the reply has no links"))
+    return links
+
+
+def _load_file_subs(path: Path, user_agent: str, timeout: int) -> Subscription:
+    """Читает файл со списком URL подписок (один URL на строку).
+    Каждый URL загружается и все ссылки объединяются."""
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        raise SubscriptionError(_("could not read file: {e}").format(e=exc)) from exc
+
+    urls = [ln.strip() for ln in text.splitlines()
+            if ln.strip() and not ln.strip().startswith("#")]
+    # Если строки выглядят как ссылки (vless:// и т.д.) — это файл ссылок, не URL
+    sub_urls = [u for u in urls if u.startswith(("http://", "https://"))]
+    if not sub_urls:
+        # Нет HTTP-ссылок — пробуем как файл готовых ссылок
+        links_raw = [u for u in urls if LINK_RE.match(u)]
+        if not links_raw:
+            raise SubscriptionError(_("the reply has no links"))
+        return Subscription(parse_many(links_raw))
+
+    # Загружаем каждый URL и объединяем все ссылки
+    all_links: list[str] = []
+    errors: list[str] = []
+    for sub_url in sub_urls:
+        try:
+            sub = fetch(sub_url, user_agent, timeout)
+            all_links.extend(lnk.raw for lnk in sub.links)
+        except SubscriptionError as exc:
+            errors.append(f"{sub_url}: {exc}")
+
+    if not all_links:
+        detail = "; ".join(errors)
+        raise SubscriptionError(_("could not download the subscription: {e}").format(e=detail))
+
+    return Subscription(parse_many(all_links))
+
+
 def fetch(url: str, user_agent: str = "podkop-sub/1.0", timeout: int = 20) -> Subscription:
     if not url:
         raise SubscriptionError(_("subscription link is not set (Settings → Subscription)"))
 
-    # Высокоуровневое разрешение URL: раскрываем deep-links и шортлинки
+    # Обработка file:// — локальный файл
+    if url.startswith("file://"):
+        path = Path(urllib.parse.unquote(url[7:]))
+        if not path.exists():
+            raise SubscriptionError(_("could not read file: {e}").format(e=_("file not found: {p}").format(p=path)))
+        # Определяем тип файла по содержимому первой непустой строки
+        try:
+            first = next((ln.strip() for ln in path.read_text(encoding="utf-8", errors="replace").splitlines()
+                          if ln.strip() and not ln.strip().startswith("#")), "")
+        except OSError as exc:
+            raise SubscriptionError(_("could not read file: {e}").format(e=exc)) from exc
+        if first.startswith(("http://", "https://")):
+            # Файл со списком URL подписок
+            return _load_file_subs(path, user_agent, timeout)
+        else:
+            # Файл с готовыми ссылками (vless://, vmess:// и т.д.)
+            return Subscription(parse_many(_load_file_links(path)))
+
+    # Раскрываем deep-links и шортлинки
     actual_url = resolve_url(url)
-    if actual_url != url:
-        # Логируем или сигнализируем, если URL изменился (опционально, для отладки)
-        pass
 
     req = urllib.request.Request(actual_url, headers={"User-Agent": user_agent or "podkop-sub/1.0"})
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             body = resp.read()
             meta = _parse_userinfo(resp.headers.get("subscription-userinfo"))
-    except Exception as exc:  # сеть, TLS, HTTP-ошибки
+    except Exception as exc:
         raise SubscriptionError(_("could not download the subscription: {e}").format(e=exc)) from exc
     return Subscription(parse_many(decode_body(body)), meta)
 

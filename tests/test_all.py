@@ -14,7 +14,7 @@ from podkop_sub.config import Config, dumps
 from podkop_sub.links import (apply_filters, compute, countries, diff, normalize,
                               parse_link, parse_many)
 from podkop_sub.router import Router, parse_status
-from podkop_sub.subscription import SubscriptionError, decode_body
+from podkop_sub.subscription import SubscriptionError, decode_body, fetch as fetch_subscription
 
 FAKEBIN = str(Path(__file__).parent / "fakebin")
 UUID = "00000000-0000-0000-0000-000000000000"
@@ -106,6 +106,50 @@ class DecodeTests(unittest.TestCase):
             decode_body(b"<html>blocked</html>")
         with self.assertRaises(SubscriptionError):
             decode_body(b"")
+
+
+class FileSubscriptionTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+
+    def test_file_links_simple(self):
+        """File with ready-made links (vless://, vmess://)"""
+        links_file = self.tmp / "links.txt"
+        links_file.write_text("\n".join([
+            SAMPLE[0],
+            SAMPLE[1],
+            "# comment should be ignored",
+            SAMPLE[2],
+        ]), encoding="utf-8")
+        sub = fetch_subscription(f"file://{links_file}")
+        self.assertEqual(len(sub.links), 3)
+        self.assertEqual(sub.links[0].cc, "NL")
+
+    def test_file_links_with_empty_lines(self):
+        """File with empty lines and comments"""
+        links_file = self.tmp / "links.txt"
+        links_file.write_text("\n".join([
+            SAMPLE[0],
+            "",
+            "  ",
+            "# just a comment",
+            SAMPLE[1],
+        ]), encoding="utf-8")
+        sub = fetch_subscription(f"file://{links_file}")
+        self.assertEqual(len(sub.links), 2)
+
+    def test_file_not_found(self):
+        """File does not exist"""
+        with self.assertRaises(SubscriptionError):
+            fetch_subscription("file:///nonexistent/file.txt")
+
+    def test_file_empty_raises(self):
+        """Empty file raises error"""
+        empty_file = self.tmp / "empty.txt"
+        empty_file.write_text("# only comments\n\n")
+        with self.assertRaises(SubscriptionError):
+            fetch_subscription(f"file://{empty_file}")
+
 
 
 def init_fake(tmp: Path, links):
