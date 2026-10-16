@@ -277,9 +277,23 @@ def step_subscription(cfg: Config, state: dict) -> str:
     from . import ui
     while True:
         subs = cfg.subscriptions
-        url = ui.text(_("Subscription link:"), subs[0]["url"] if subs else "")
+        url = ui.text(_("Subscription link (or empty to skip):"), subs[0]["url"] if subs else "")
         if url is None:
             return "back"
+
+        # Пропуск если пустая строка
+        if not url.strip():
+            choice = ui.select(
+                _("No subscription configured. Continue?"),
+                [(_("Skip for now (configure in Settings later)"), "skip"),
+                 (_("Go back and enter URL"), "retry")])
+            if choice == ui.BACK:
+                continue
+            if choice == "skip":
+                return "next"
+            else:
+                continue
+
         if subs:
             subs[0]["url"] = url.strip()
         else:
@@ -290,6 +304,16 @@ def step_subscription(cfg: Config, state: dict) -> str:
             types = sorted({l.scheme for l in fetched.raw_links})
             print(_("Links received: {n} (types: {types})").format(
                 n=len(fetched.raw_links), types=", ".join(types)))
+            return "next"
+
+        # Ошибка загрузки - предложить пропустить
+        choice = ui.select(
+            _("Subscription could not be loaded. What next?"),
+            [(_("Retry with different URL"), "retry"),
+             (_("Skip for now (configure in Settings later)"), "skip")])
+        if choice == ui.BACK:
+            continue
+        if choice == "skip":
             return "next"
 
 
@@ -378,15 +402,15 @@ def step_types(cfg: Config, state: dict) -> str:
     for l in sub.raw_links:
         counts[l.scheme] = counts.get(l.scheme, 0) + 1
     chosen = set(cfg["filters"]["types"])
-    while True:
-        res = ui.checkbox(_("Which link types to take from the subscription:"),
-                          [(f"{t} ({n})", t, t in chosen) for t, n in sorted(counts.items())])
-        if res is None:
-            return "back"
-        if res:
-            cfg["filters"]["types"] = res
-            return "next"
-        print(_("Choose at least one type."))
+
+    res = ui.checkbox(_("Which link types to take from the subscription (empty = all types):"),
+                      [(f"{t} ({n})", t, t in chosen) for t, n in sorted(counts.items())])
+    if res is None:
+        return "back"
+
+    # Пустой выбор = все типы (дефолт)
+    cfg["filters"]["types"] = res if res else []
+    return "next"
 
 
 def _country_items(links: list[Link], selected: set[str], emoji: bool):
@@ -480,14 +504,35 @@ def step_protect(cfg: Config, state: dict) -> str:
 WIZARD_STEPS = [step_language, step_subscription, step_router, step_section,
                 step_types, step_exclude, step_prefer, step_protect]
 
+# Названия шагов для прогресса
+WIZARD_STEP_NAMES = {
+    "step_language": _("Language"),
+    "step_subscription": _("Subscription"),
+    "step_router": _("Router connection"),
+    "step_section": _("Podkop section"),
+    "step_types": _("Link types"),
+    "step_exclude": _("Excluded countries"),
+    "step_prefer": _("Preferred countries"),
+    "step_protect": _("Protected links"),
+}
+
 
 def wizard(cfg: Config) -> bool:
     snapshot = copy.deepcopy(cfg.data)
     state: dict = {"fetched": None}
     i = 0
-    print(_("\n=== Initial setup ===  (Ctrl+C at a prompt — go back one step)\n"))
-    while 0 <= i < len(WIZARD_STEPS):
-        i += 1 if WIZARD_STEPS[i](cfg, state) == "next" else -1
+    total = len(WIZARD_STEPS)
+    print(_("\n=== Initial setup ===\n"))
+    print(_("Use Ctrl+C to go back one step. Most steps can be skipped.\n"))
+
+    while 0 <= i < total:
+        step_func = WIZARD_STEPS[i]
+        step_name = WIZARD_STEP_NAMES.get(step_func.__name__, step_func.__name__)
+        print(f"\n━━━ [{i+1}/{total}] {step_name} ━━━")
+
+        result = step_func(cfg, state)
+        i += 1 if result == "next" else -1
+
     if i < 0:
         cfg.data = snapshot
         set_language(cfg["ui"]["language"])
