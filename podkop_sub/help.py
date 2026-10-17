@@ -37,6 +37,27 @@ SYNC (what a scheduled run does)
   5. replace dead links with fresh copies that respond
   6. write → reload → verify → restart if needed  7. Telegram report
 
+SUBSCRIPTION FORMATS
+  Supported: a list of vless:// lines, or the same list in base64.
+  Not supported: Clash or Xray JSON, encrypted happ://crypt links.
+  Wrapped links (incy://add/…, ?url=…) are unwrapped automatically; the address
+  that is actually downloaded is the unwrapped one.
+
+FILES
+  ~/.config/podkop-sub/config.toml   settings, subscription URL, Telegram token (mode 600)
+  ~/.config/podkop-sub/known_hosts   router SSH key you confirmed in the wizard
+  ~/.local/share/podkop-sub/state.json   which subscription each link came from
+  ~/.local/share/podkop-sub/backups  backups of the podkop config (contain your link data)
+  /var/log/podkop-sub.log            log of scheduled runs
+
+ROUTER KEY
+  The wizard shows the router's SSH fingerprint and asks you to confirm it once.
+  If the router was reinstalled and SSH refuses to connect, delete known_hosts
+  and run the wizard again after checking that the new key is really yours.
+
+ROLLBACK
+  Links on the router → Backups and rollback, or --rollback. Then Podkop → Reload.
+
 COMMAND LINE
   --list  --check  --check-sub  --sync [--dry-run]  --update [--action …]
   --rollback  --wizard  --config PATH
@@ -76,6 +97,26 @@ podkop-sub — импортирует VLESS-ссылки из подписки �
      ручные ссылки не трогает, ссылки недоступной подписки оставляет
   5. заменяет мёртвые ссылки свежими, которые отвечают
   6. запись → reload → проверка → при необходимости restart  7. отчёт в Telegram
+
+ФОРМАТЫ ПОДПИСКИ
+  Поддерживаются: список строк vless://, или тот же список в base64.
+  Не поддерживаются: JSON Clash и Xray, зашифрованные ссылки happ://crypt.
+  Обёртки (incy://add/…, ?url=…) раскрываются автоматически; загружается уже раскрытый адрес.
+
+ФАЙЛЫ
+  ~/.config/podkop-sub/config.toml   настройки, ссылка подписки, токен Telegram (права 600)
+  ~/.config/podkop-sub/known_hosts   ключ SSH роутера, который вы подтвердили в мастере
+  ~/.local/share/podkop-sub/state.json   из какой подписки взята каждая ссылка
+  ~/.local/share/podkop-sub/backups  бэкапы конфига podkop (в них есть ваши данные ссылок)
+  /var/log/podkop-sub.log            журнал запусков по расписанию
+
+КЛЮЧ РОУТЕРА
+  Мастер показывает отпечаток SSH-ключа роутера и просит подтвердить его один раз.
+  Если роутер переустановлен и SSH не подключается, удалите known_hosts и пройдите
+  мастер заново, предварительно убедившись, что новый ключ действительно ваш.
+
+ОТКАТ
+  Ссылки на роутере → Бэкапы и откат, или --rollback. Затем Podkop → Reload.
 
 КОМАНДНАЯ СТРОКА
   --list  --check  --check-sub  --sync [--dry-run]  --update [--action …]

@@ -103,8 +103,13 @@ failures, default 3).
 ## Configuration and security
 
 `~/.config/podkop-sub/config.toml` is created with mode 600: it holds the subscription URL
-(with its token). The router key `id_ed25519` is also private. Neither file should be
-published or committed.
+(with its token) and the Telegram bot token. The router key `id_ed25519` is also private, and
+`known_hosts` there stores the router's SSH key you confirmed. Backups in
+`~/.local/share/podkop-sub/backups` contain the podkop config with your servers' UUIDs, so
+they are private too. Nothing of these should be published or committed.
+
+The install script downloads sing-box only if the SHA-256 from GitHub's release metadata matches
+the archive; otherwise it skips the install and checks links by TCP only.
 
 ## Tests
 

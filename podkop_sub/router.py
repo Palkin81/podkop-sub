@@ -34,12 +34,13 @@ class Router:
     def __init__(self, host: str, port: int = 22, user: str = "root",
                  key_path: str | Path = "", section: str = "Proxy",
                  timeout: int = 30, ssh_bin: str | None = None,
-                 config_file: str | None = None):
+                 config_file: str | None = None, known_hosts: str | None = None):
         if not NAME_RE.match(section):
             raise RouterError(_("invalid section name: {n!r}").format(n=section))
         self.host, self.port, self.user = host, int(port), user
         self.key_path = str(Path(os.path.expanduser(str(key_path)))) if key_path else ""
         self.section = section
+        self.known_hosts = known_hosts  # файл с ключом роутера, который пользователь подтвердил
         self.timeout = timeout
         # переменные окружения нужны только тестам
         self.ssh_bin = ssh_bin or os.environ.get("PODKOP_SUB_SSH", "ssh")
@@ -53,8 +54,12 @@ class Router:
     def _ssh(self, remote_cmd: str, stdin: str | None = None, check: bool = True,
              timeout: float | None = None) -> str:
         cmd = [self.ssh_bin, "-p", str(self.port),
-               "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
-               "-o", "StrictHostKeyChecking=accept-new"]
+               "-o", "BatchMode=yes", "-o", "ConnectTimeout=10"]
+        if self.known_hosts and Path(self.known_hosts).is_file():
+            # ключ подтверждён в мастере: при смене ключа подключение прерывается
+            cmd += ["-o", f"UserKnownHostsFile={self.known_hosts}", "-o", "StrictHostKeyChecking=yes"]
+        else:
+            cmd += ["-o", "StrictHostKeyChecking=accept-new"]
         if self.key_path:
             cmd += ["-i", self.key_path, "-o", "IdentitiesOnly=yes"]
         cmd += [f"{self.user}@{self.host}", remote_cmd]
@@ -124,8 +129,9 @@ class Router:
         content = Path(backup).read_text(encoding="utf-8")
         if "config " not in content:
             raise RouterError(_("the backup file does not look like a podkop config"))
-        tmp = "/tmp/podkop.restore"
-        cmd = (f"cat > {tmp} && cp {tmp} {shlex.quote(self.config_file)} && rm -f {tmp}")
+        # mktemp создаёт уникальный файл с правами 600: без предсказуемого имени в /tmp
+        cmd = (f"tmp=$(mktemp) && cat > \"$tmp\" && cp \"$tmp\" {shlex.quote(self.config_file)}; "
+               f"rc=$?; rm -f \"$tmp\"; exit $rc")
         self._ssh(cmd, stdin=content)
 
     # --- сервис ---------------------------------------------------------
