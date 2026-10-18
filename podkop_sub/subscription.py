@@ -185,7 +185,6 @@ def fetch(url: str, user_agent: str = "podkop-sub/1.0", timeout: int = 20) -> Su
 
     # Раскрываем deep-links и шортлинки
     actual_url = resolve_url(url)
-
     req = urllib.request.Request(actual_url, headers={"User-Agent": user_agent or "podkop-sub/1.0"})
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:

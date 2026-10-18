@@ -37,16 +37,33 @@ if [ ! -x /usr/local/bin/sing-box ]; then
         *) SB_ARCH="" ;;
     esac
     if [ -n "$SB_ARCH" ]; then
+        # приватная временная папка: имена в общем /tmp предсказуемы, а скрипт работает от root
+        WORK=$(mktemp -d)
+        trap 'rm -rf "$WORK"' EXIT
         TAG=$(curl -fsS https://api.github.com/repos/SagerNet/sing-box/releases/latest 2>/dev/null \
               | sed -n 's/.*"tag_name": *"v\([^"]*\)".*/\1/p' | head -1)
-        if [ -n "$TAG" ] && curl -fsSL -o /tmp/sing-box.tgz \
-            "https://github.com/SagerNet/sing-box/releases/download/v$TAG/sing-box-$TAG-linux-$SB_ARCH.tar.gz"; then
-            tar -xzf /tmp/sing-box.tgz -C /tmp
-            install -m 755 "/tmp/sing-box-$TAG-linux-$SB_ARCH/sing-box" /usr/local/bin/sing-box
-            rm -rf /tmp/sing-box.tgz "/tmp/sing-box-$TAG-linux-$SB_ARCH"
-            echo "sing-box $TAG installed to /usr/local/bin/sing-box"
+        ASSET="sing-box-$TAG-linux-$SB_ARCH.tar.gz"
+        installed=""
+        if [ -n "$TAG" ]; then
+            # SHA-256 берём из метаданных релиза и сверяем с архивом до установки
+            DIGEST=$(curl -fsS "https://api.github.com/repos/SagerNet/sing-box/releases/tags/v$TAG" 2>/dev/null \
+                     | python3 -c "import json,sys; d=json.load(sys.stdin); print(next((a.get('digest','').split(':')[-1] for a in d.get('assets',[]) if a.get('name')=='$ASSET'),''))" 2>/dev/null)
+            if [ -n "$DIGEST" ] && curl -fsSL -o "$WORK/sb.tgz" \
+                "https://github.com/SagerNet/sing-box/releases/download/v$TAG/$ASSET"; then
+                ACTUAL=$(sha256sum "$WORK/sb.tgz" | cut -d' ' -f1)
+                if [ "$ACTUAL" = "$DIGEST" ]; then
+                    tar -xzf "$WORK/sb.tgz" -C "$WORK"
+                    install -m 755 "$WORK/sing-box-$TAG-linux-$SB_ARCH/sing-box" /usr/local/bin/sing-box
+                    installed="$TAG"
+                else
+                    echo "sing-box checksum mismatch, not installed." >&2
+                fi
+            fi
+        fi
+        if [ -n "$installed" ]; then
+            echo "sing-box $installed installed to /usr/local/bin/sing-box"
         else
-            echo "Could not download sing-box: links will be checked by TCP only (see README)." >&2
+            echo "sing-box not installed (download or checksum check failed): links will be checked by TCP only (see README)." >&2
         fi
     fi
 fi

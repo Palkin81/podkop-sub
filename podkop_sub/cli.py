@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import os
 import re
 import subprocess
 import sys
@@ -50,7 +51,31 @@ def make_router(cfg: Config) -> Router:
     r = cfg["router"]
     if not r["host"]:
         raise RouterError(_("Router address is not set (Settings → Router)"))
-    return Router(r["host"], r["port"], r["user"], r["key_path"], r["section"])
+    return Router(r["host"], r["port"], r["user"], r["key_path"], r["section"],
+                  known_hosts=str(known_hosts_path(cfg)))
+
+
+def known_hosts_path(cfg: Config) -> Path:
+    return Path(cfg.path).parent / "known_hosts"
+
+
+def scan_host_key(host: str, port: int) -> str:
+    """Публичные ключи, которые отдаёт SSH-сервер роутера (пусто, если не ответил)."""
+    try:
+        res = subprocess.run(["ssh-keyscan", "-T", "10", "-p", str(port), host],
+                             capture_output=True, text=True, timeout=20)
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    return "\n".join(line for line in res.stdout.splitlines() if line and not line.startswith("#"))
+
+
+def key_fingerprint(keys: str) -> str:
+    try:
+        res = subprocess.run(["ssh-keygen", "-lf", "-"], input=keys, capture_output=True, text=True,
+                             timeout=10)
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    return res.stdout.strip()
 
 
 def load_fetched(cfg: Config) -> Fetched:
@@ -294,7 +319,17 @@ def step_subscription(cfg: Config, state: dict) -> str:
             else:
                 continue
 
-        if subs:
+        had_sub = bool(subs)
+        previous = subs[0]["url"] if had_sub else ""
+
+        def restore() -> None:
+            # неудачная ссылка не должна остаться в конфиге: иначе cron будет падать каждый раз
+            if had_sub:
+                subs[0]["url"] = previous
+            else:
+                subs.clear()
+
+        if had_sub:
             subs[0]["url"] = url.strip()
         else:
             subs.append({"name": "main", "url": url.strip(), "enabled": True})
@@ -306,15 +341,14 @@ def step_subscription(cfg: Config, state: dict) -> str:
                 n=len(fetched.raw_links), types=", ".join(types)))
             return "next"
 
-        # Ошибка загрузки - предложить пропустить
+        restore()
         choice = ui.select(
             _("Subscription could not be loaded. What next?"),
             [(_("Retry with different URL"), "retry"),
              (_("Skip for now (configure in Settings later)"), "skip")])
-        if choice == ui.BACK:
-            continue
         if choice == "skip":
             return "next"
+        continue
 
 
 def _keygen(path: Path) -> str:
@@ -338,6 +372,17 @@ def step_router(cfg: Config, state: dict) -> str:
         return "back"
     r.update(host=host.strip(), port=int(port) if port.strip().isdigit() else 22,
              user=user.strip() or "root")
+    keys = scan_host_key(r["host"], r["port"])
+    if keys:
+        # подтверждаем отпечаток ключа один раз, дальше SSH проверяет его сам
+        print(_("Fingerprint of the router's SSH key:") + "\n  " + key_fingerprint(keys))
+        if not ui.confirm(_("Trust this key and remember it?"), True):
+            return "back"
+        path = known_hosts_path(cfg)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(keys + "\n")
     key = Path(r["key_path"]).expanduser()
     pub = Path(str(key) + ".pub")
     if not key.exists():
@@ -403,14 +448,15 @@ def step_types(cfg: Config, state: dict) -> str:
         counts[l.scheme] = counts.get(l.scheme, 0) + 1
     chosen = set(cfg["filters"]["types"])
 
-    res = ui.checkbox(_("Which link types to take from the subscription (empty = all types):"),
-                      [(f"{t} ({n})", t, t in chosen) for t, n in sorted(counts.items())])
-    if res is None:
-        return "back"
-
-    # Пустой выбор = все типы (дефолт)
-    cfg["filters"]["types"] = res if res else []
-    return "next"
+    while True:
+        res = ui.checkbox(_("Which link types to take from the subscription:"),
+                          [(f"{t} ({n})", t, t in chosen) for t, n in sorted(counts.items())])
+        if res is None:
+            return "back"
+        if res:
+            cfg["filters"]["types"] = res
+            return "next"
+        print(_("Choose at least one type."))
 
 
 def _country_items(links: list[Link], selected: set[str], emoji: bool):
@@ -504,17 +550,18 @@ def step_protect(cfg: Config, state: dict) -> str:
 WIZARD_STEPS = [step_language, step_subscription, step_router, step_section,
                 step_types, step_exclude, step_prefer, step_protect]
 
-# Названия шагов для прогресса
-WIZARD_STEP_NAMES = {
-    "step_language": _("Language"),
-    "step_subscription": _("Subscription"),
-    "step_router": _("Router connection"),
-    "step_section": _("Podkop section"),
-    "step_types": _("Link types"),
-    "step_exclude": _("Excluded countries"),
-    "step_prefer": _("Preferred countries"),
-    "step_protect": _("Protected links"),
-}
+def wizard_step_names() -> dict[str, str]:
+    """Названия шагов для прогресса. Строим при вызове: язык выбирается уже в мастере."""
+    return {
+        "step_language": _("Language"),
+        "step_subscription": _("Subscription"),
+        "step_router": _("Router connection"),
+        "step_section": _("Podkop section"),
+        "step_types": _("Link types"),
+        "step_exclude": _("Excluded countries"),
+        "step_prefer": _("Preferred countries"),
+        "step_protect": _("Protected links"),
+    }
 
 
 def wizard(cfg: Config) -> bool:
@@ -522,12 +569,13 @@ def wizard(cfg: Config) -> bool:
     state: dict = {"fetched": None}
     i = 0
     total = len(WIZARD_STEPS)
+    names = wizard_step_names()
     print(_("\n=== Initial setup ===\n"))
     print(_("Use Ctrl+C to go back one step. Most steps can be skipped.\n"))
 
     while 0 <= i < total:
         step_func = WIZARD_STEPS[i]
-        step_name = WIZARD_STEP_NAMES.get(step_func.__name__, step_func.__name__)
+        step_name = names.get(step_func.__name__, step_func.__name__)
         print(f"\n━━━ [{i+1}/{total}] {step_name} ━━━")
 
         result = step_func(cfg, state)
